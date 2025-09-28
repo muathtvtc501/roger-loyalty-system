@@ -2,29 +2,32 @@ from flask import Flask, request, jsonify, render_template
 import sqlite3
 import bcrypt
 import smtplib
-from email.mime.text import MimeText
-from email.mime.multipart import MimeMultipart
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import os
 import secrets
 import re
 import random
 from datetime import datetime, timedelta
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 app.secret_key = os.environ.get('SECRET_KEY', 'roger-loyalty-secret-key-2024')
 
 # إعدادات الإيميل
 SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 465
+SMTP_PORT = 587
 EMAIL_USER = os.environ.get('EMAIL_USER', 'modmac1000@gmail.com')
 EMAIL_PASS = os.environ.get('EMAIL_PASS', 'yglr plkj lmhr ahty')
+
 def generate_member_id():
-    """توليد رقم عضوية فريد"""
+    """توليد رقم عضوية فريد بالشكل LA-ROJ + 7 أرقام عشوائية"""
     random_numbers = ''.join([str(random.randint(0, 9)) for _ in range(7)])
     return f"LA-ROJ{random_numbers}"
 
 def init_database():
-    """إنشاء قاعدة البيانات والجداول"""
+    """إنشاء قاعدة البيانات و الجدول الأول"""
     conn = sqlite3.connect('roger_loyalty.db')
     cursor = conn.cursor()
     
@@ -35,465 +38,467 @@ def init_database():
             member_id TEXT UNIQUE NOT NULL,
             full_name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
-            phone TEXT UNIQUE NOT NULL,
-            birth_date DATE NOT NULL,
-            password TEXT NOT NULL,
-            points INTEGER DEFAULT 0,
-            is_verified BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # جدول رموز التحقق
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS verification_codes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
             phone TEXT,
-            member_id TEXT,
-            code TEXT NOT NULL,
-            code_type TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            is_used BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            birth_date TEXT,
+            password TEXT NOT NULL,
+            verification_code TEXT,
+            verified INTEGER DEFAULT 0,
+            reset_token TEXT,
+            reset_expires TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # جدول المعاملات
+    # جدول النقاط والمعاملات
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            points INTEGER NOT NULL,
+            member_id TEXT NOT NULL,
             transaction_type TEXT NOT NULL,
+            points INTEGER NOT NULL,
             description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (member_id) REFERENCES users(member_id)
+        )
+    ''')
+    
+    # جدول نقاط المستخدمين
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_points (
+            member_id TEXT PRIMARY KEY,
+            total_points INTEGER DEFAULT 0,
+            FOREIGN KEY (member_id) REFERENCES users(member_id)
         )
     ''')
     
     conn.commit()
     conn.close()
 
-def send_verification_email(email, code, code_type):
-    """إرسال رمز التحقق عبر الإيميل"""
+def send_email(to_email, subject, body):
+    """إرسال إيميل"""
     try:
-        msg = MimeMultipart()
+        msg = MIMEMultipart()
         msg['From'] = EMAIL_USER
-        msg['To'] = email
+        msg['To'] = to_email
+        msg['Subject'] = subject
         
-        if code_type == 'register':
-            msg['Subject'] = "رمز التحقق - Roger Loyalty"
-            body = f"""
-            مرحباً بك في نظام Roger Loyalty!
-            
-            رمز التحقق الخاص بك هو: {code}
-            
-            يرجى إدخال هذا الرمز لتفعيل حسابك.
-            الرمز صالح لمدة 10 دقائق فقط.
-            
-            إذا لم تقم بإنشاء هذا الحساب، يرجى تجاهل هذا الإيميل.
-            """
-        elif code_type == 'login':
-            msg['Subject'] = "رمز تسجيل الدخول - Roger Loyalty"
-            body = f"""
-            رمز تسجيل الدخول الخاص بك هو: {code}
-            
-            يرجى إدخال هذا الرمز لتسجيل الدخول.
-            الرمز صالح لمدة 5 دقائق فقط.
-            
-            إذا لم تحاول تسجيل الدخول، يرجى تجاهل هذا الإيميل.
-            """
-        elif code_type == 'reset_password':
-            msg['Subject'] = "رمز إعادة تعيين كلمة المرور - Roger Loyalty"
-            body = f"""
-            رمز إعادة تعيين كلمة المرور الخاص بك هو: {code}
-            
-            يرجى إدخال هذا الرمز لإعادة تعيين كلمة المرور.
-            الرمز صالح لمدة 10 دقائق فقط.
-            
-            إذا لم تطلب إعادة تعيين كلمة المرور، يرجى تجاهل هذا الإيميل.
-            """
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        msg.attach(MimeText(body, 'plain', 'utf-8'))
-        
-        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
         server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
+        text = msg.as_string()
+        server.sendmail(EMAIL_USER, to_email, text)
         server.quit()
-        
         return True
     except Exception as e:
-        print(f"خطأ في إرسال الإيميل: {e}")
+        print(f"خطأ في إرسال الإيميل: {str(e)}")
         return False
 
-def generate_verification_code():
-    """توليد رمز تحقق مكون من 6 أرقام"""
-    return ''.join([str(random.randint(0, 9)) for _ in range(6)])
+def validate_email(email):
+    """التحقق من صحة الإيميل"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
 
 @app.route('/')
 def index():
+    """الصفحة الرئيسية"""
     return render_template('login.html')
 
-@app.route('/check_availability', methods=['POST'])
-def check_availability():
-    """التحقق من توفر الإيميل ورقم الهاتف"""
+@app.route('/register', methods=['POST'])
+def register():
+    """تسجيل مستخدم جديد"""
     try:
-        data = request.json
-        email = data.get('email', '').strip().lower()
-        phone = data.get('phone', '').strip()
+        data = request.get_json()
+        
+        full_name = data.get('full_name')
+        email = data.get('email')
+        phone = data.get('phone')
+        birth_date = data.get('birth_date')
+        password = data.get('password')
+        
+        # التحقق من البيانات المطلوبة
+        if not all([full_name, email, password]):
+            return jsonify({"message": "يرجى ملء جميع الحقول المطلوبة"}), 400
+        
+        # التحقق من صحة الإيميل
+        if not validate_email(email):
+            return jsonify({"message": "صيغة الإيميل غير صحيحة"}), 400
+        
+        # التحقق من قوة كلمة المرور
+        if len(password) < 6:
+            return jsonify({"message": "كلمة المرور يجب أن تكون 6 أحرف على الأقل"}), 400
         
         conn = sqlite3.connect('roger_loyalty.db')
         cursor = conn.cursor()
         
-        result = {'email_available': True, 'phone_available': True}
-        
-        if email:
-            cursor.execute('SELECT id FROM users WHERE email = ?', (email,))
-            if cursor.fetchone():
-                result['email_available'] = False
-        
-        if phone:
-            cursor.execute('SELECT id FROM users WHERE phone = ?', (phone,))
-            if cursor.fetchone():
-                result['phone_available'] = False
-        
-        conn.close()
-        return jsonify(result)
-    
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-@app.route('/send_register_code', methods=['POST'])
-def send_register_code():
-    """إرسال رمز التحقق للتسجيل"""
-    try:
-        data = request.json
-        email = data.get('email', '').strip().lower()
-        
-        if not email:
-            return jsonify({'success': False, 'message': 'الإيميل مطلوب'})
-        
-        # توليد رمز التحقق
-        code = generate_verification_code()
-        expires_at = datetime.now() + timedelta(minutes=10)
-        
-        # حفظ الرمز في قاعدة البيانات
-        conn = sqlite3.connect('roger_loyalty.db')
-        cursor = conn.cursor()
-        
-        # حذف الرموز المنتهية الصلاحية
-        cursor.execute('DELETE FROM verification_codes WHERE expires_at < ? AND email = ?', 
-                      (datetime.now(), email))
-        
-        cursor.execute('''
-            INSERT INTO verification_codes (email, code, code_type, expires_at)
-            VALUES (?, ?, 'register', ?)
-        ''', (email, code, expires_at))
-        
-        conn.commit()
-        conn.close()
-        
-        # إرسال الرمز عبر الإيميل
-        if send_verification_email(email, code, 'register'):
-            return jsonify({'success': True, 'message': 'تم إرسال رمز التحقق إلى إيميلك'})
-        else:
-            return jsonify({'success': False, 'message': 'حدث خطأ في إرسال الإيميل'})
-    
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'حدث خطأ: {str(e)}'})
-
-@app.route('/verify_register_code', methods=['POST'])
-def verify_register_code():
-    """التحقق من رمز التسجيل وإنشاء الحساب"""
-    try:
-        data = request.json
-        email = data.get('email', '').strip().lower()
-        code = data.get('code', '').strip()
-        full_name = data.get('full_name', '').strip()
-        phone = data.get('phone', '').strip()
-        birth_date = data.get('birth_date', '').strip()
-        password = data.get('password', '')
-        
-        # التحقق من الرمز
-        conn = sqlite3.connect('roger_loyalty.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT id FROM verification_codes 
-            WHERE email = ? AND code = ? AND code_type = 'register' 
-            AND expires_at > ? AND is_used = 0
-        ''', (email, code, datetime.now()))
-        
-        verification = cursor.fetchone()
-        
-        if not verification:
+        # التحقق من عدم وجود الإيميل مسبقاً
+        cursor.execute("SELECT email FROM users WHERE email = ?", (email,))
+        if cursor.fetchone():
             conn.close()
-            return jsonify({'success': False, 'message': 'رمز التحقق غير صحيح أو منتهي الصلاحية'})
+            return jsonify({"message": "الإيميل مسجل مسبقاً"}), 400
         
         # تشفير كلمة المرور
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
         # توليد رقم عضوية فريد
-        member_id = generate_member_id()
         while True:
-            cursor.execute('SELECT id FROM users WHERE member_id = ?', (member_id,))
+            member_id = generate_member_id()
+            cursor.execute("SELECT member_id FROM users WHERE member_id = ?", (member_id,))
             if not cursor.fetchone():
                 break
-            member_id = generate_member_id()
         
-        # إنشاء الحساب
+        # توليد رمز التحقق
+        verification_code = str(random.randint(100000, 999999))
+        
+        # إدراج المستخدم الجديد
         cursor.execute('''
-            INSERT INTO users (member_id, full_name, email, phone, birth_date, password, is_verified)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-        ''', (member_id, full_name, email, phone, birth_date, hashed_password))
+            INSERT INTO users (member_id, full_name, email, phone, birth_date, password, verification_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (member_id, full_name, email, phone, birth_date, hashed_password, verification_code))
         
-        # تحديث حالة الرمز إلى مستخدم
-        cursor.execute('UPDATE verification_codes SET is_used = 1 WHERE id = ?', (verification[0],))
+        # إنشاء سجل النقاط الأولي
+        cursor.execute("INSERT INTO user_points (member_id, total_points) VALUES (?, 0)", (member_id,))
+        
+        # إضافة معاملة ترحيبية (نقاط مجانية)
+        cursor.execute('''
+            INSERT INTO transactions (member_id, transaction_type, points, description)
+            VALUES (?, 'bonus', 100, 'نقاط ترحيبية للانضمام لنظام الولاء')
+        ''', (member_id,))
+        
+        # تحديث إجمالي النقاط
+        cursor.execute("UPDATE user_points SET total_points = 100 WHERE member_id = ?", (member_id,))
         
         conn.commit()
         conn.close()
         
-        return jsonify({
-            'success': True,
-            'message': f'تم إنشاء حسابك بنجاح! رقم العضوية الخاص بك: {member_id}',
-            'member_id': member_id
-        })
-    
-    except sqlite3.IntegrityError:
-        return jsonify({'success': False, 'message': 'الإيميل أو رقم الهاتف مستخدم مسبقاً'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'حدث خطأ: {str(e)}'})
-
-@app.route('/send_login_code', methods=['POST'])
-def send_login_code():
-    """إرسال رمز تسجيل الدخول"""
-    try:
-        data = request.json
-        login_field = data.get('login_field', '').strip()
-        password = data.get('password', '')
+        # إرسال إيميل التحقق
+        subject = "تحقق من حساب Roger Loyalty"
+        body = f"""
+        أهلاً {full_name}،
         
-        if not login_field or not password:
-            return jsonify({'success': False, 'message': 'يرجى ملء جميع الحقول'})
+        مرحباً بك في نظام الولاء Roger Loyalty!
+        
+        رقم عضويتك: {member_id}
+        رمز التحقق: {verification_code}
+        
+        يرجى إدخال هذا الرمز لتفعيل حسابك.
+        
+        مع تحيات فريق Roger Loyalty
+        """
+        
+        email_sent = send_email(email, subject, body)
+        
+        return jsonify({
+            "message": "تم إنشاء الحساب بنجاح! يرجى التحقق من الإيميل لتفعيل الحساب.",
+            "member_id": member_id,
+            "email_sent": email_sent
+        }), 201
+        
+    except Exception as e:
+        return jsonify({"message": f"خطأ في إنشاء الحساب: {str(e)}"}), 500
+
+@app.route('/verify', methods=['POST'])
+def verify_account():
+    """تفعيل الحساب بواسطة رمز التحقق"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        verification_code = data.get('verification_code')
+        
+        if not all([email, verification_code]):
+            return jsonify({"message": "يرجى إدخال الإيميل ورمز التحقق"}), 400
         
         conn = sqlite3.connect('roger_loyalty.db')
         cursor = conn.cursor()
         
-        # البحث عن المستخدم
-        if '@' in login_field:
-            cursor.execute('SELECT id, email, password, is_verified FROM users WHERE email = ?', (login_field.lower(),))
-        elif login_field.startswith('LA-ROJ'):
-            cursor.execute('SELECT id, email, password, is_verified FROM users WHERE member_id = ?', (login_field,))
-        else:
-            cursor.execute('SELECT id, email, password, is_verified FROM users WHERE phone = ?', (login_field,))
-        
+        cursor.execute("SELECT id, member_id, full_name, verified FROM users WHERE email = ? AND verification_code = ?", 
+                      (email, verification_code))
         user = cursor.fetchone()
         
         if not user:
             conn.close()
-            return jsonify({'success': False, 'message': 'المستخدم غير موجود'})
+            return jsonify({"message": "رمز التحقق غير صحيح"}), 400
         
-        if not user[3]:  # غير مفعل
+        if user[3] == 1:
             conn.close()
-            return jsonify({'success': False, 'message': 'الحساب غير مفعل'})
+            return jsonify({"message": "الحساب مفعل مسبقاً"}), 400
+        
+        # تفعيل الحساب
+        cursor.execute("UPDATE users SET verified = 1, verification_code = NULL WHERE email = ?", (email,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "message": "تم تفعيل الحساب بنجاح!",
+            "member_id": user[1],
+            "full_name": user[2]
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"message": f"خطأ في التحقق: {str(e)}"}), 500
+
+@app.route('/login', methods=['POST'])
+def login():
+    """تسجيل الدخول"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not all([email, password]):
+            return jsonify({"message": "يرجى إدخال الإيميل وكلمة المرور"}), 400
+        
+        conn = sqlite3.connect('roger_loyalty.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id, member_id, full_name, password, verified FROM users WHERE email = ?", (email,))
+        user = cursor.fetchone()
+        
+        if not user:
+            conn.close()
+            return jsonify({"message": "بيانات الدخول غير صحيحة"}), 401
         
         # التحقق من كلمة المرور
-        if not bcrypt.checkpw(password.encode('utf-8'), user[2]):
+        if not bcrypt.checkpw(password.encode('utf-8'), user[3].encode('utf-8')):
             conn.close()
-            return jsonify({'success': False, 'message': 'كلمة المرور غير صحيحة'})
+            return jsonify({"message": "بيانات الدخول غير صحيحة"}), 401
         
-        # توليد رمز تسجيل الدخول
-        code = generate_verification_code()
-        expires_at = datetime.now() + timedelta(minutes=5)
-        
-        cursor.execute('''
-            INSERT INTO verification_codes (email, code, code_type, expires_at)
-            VALUES (?, ?, 'login', ?)
-        ''', (user[1], code, expires_at))
-        
-        conn.commit()
-        conn.close()
-        
-        if send_verification_email(user[1], code, 'login'):
-            return jsonify({'success': True, 'message': 'تم إرسال رمز تسجيل الدخول إلى إيميلك'})
-        else:
-            return jsonify({'success': False, 'message': 'حدث خطأ في إرسال الإيميل'})
-    
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'حدث خطأ: {str(e)}'})
-
-@app.route('/verify_login_code', methods=['POST'])
-def verify_login_code():
-    """التحقق من رمز تسجيل الدخول"""
-    try:
-        data = request.json
-        login_field = data.get('login_field', '').strip()
-        code = data.get('code', '').strip()
-        
-        conn = sqlite3.connect('roger_loyalty.db')
-        cursor = conn.cursor()
-        
-        # الحصول على الإيميل
-        if '@' in login_field:
-            email = login_field.lower()
-        elif login_field.startswith('LA-ROJ'):
-            cursor.execute('SELECT email FROM users WHERE member_id = ?', (login_field,))
-            result = cursor.fetchone()
-            if not result:
-                conn.close()
-                return jsonify({'success': False, 'message': 'المستخدم غير موجود'})
-            email = result[0]
-        else:
-            cursor.execute('SELECT email FROM users WHERE phone = ?', (login_field,))
-            result = cursor.fetchone()
-            if not result:
-                conn.close()
-                return jsonify({'success': False, 'message': 'المستخدم غير موجود'})
-            email = result[0]
-        
-        # التحقق من الرمز
-        cursor.execute('''
-            SELECT id FROM verification_codes 
-            WHERE email = ? AND code = ? AND code_type = 'login' 
-            AND expires_at > ? AND is_used = 0
-        ''', (email, code, datetime.now()))
-        
-        verification = cursor.fetchone()
-        
-        if not verification:
+        if user[4] == 0:
             conn.close()
-            return jsonify({'success': False, 'message': 'رمز التحقق غير صحيح أو منتهي الصلاحية'})
+            return jsonify({
+                "message": "يرجى تفعيل الحساب أولاً",
+                "requires_verification": True
+            }), 200
         
-        # الحصول على بيانات المستخدم
-        cursor.execute('SELECT id, member_id, full_name, points FROM users WHERE email = ?', (email,))
-        user = cursor.fetchone()
+        # الحصول على النقاط
+        cursor.execute("SELECT total_points FROM user_points WHERE member_id = ?", (user[1],))
+        points_data = cursor.fetchone()
+        total_points = points_data[0] if points_data else 0
         
-        # تحديث حالة الرمز
-        cursor.execute('UPDATE verification_codes SET is_used = 1 WHERE id = ?', (verification[0],))
-        
-        conn.commit()
         conn.close()
         
         return jsonify({
-            'success': True,
-            'message': 'تم تسجيل الدخول بنجاح',
-            'user': {
-                'id': user[0],
-                'member_id': user[1],
-                'name': user[2],
-                'points': user[3]
+            "message": "تم تسجيل الدخول بنجاح",
+            "user": {
+                "id": user[0],
+                "member_id": user[1],
+                "full_name": user[2],
+                "email": email,
+                "total_points": total_points
             }
-        })
-    
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'حدث خطأ: {str(e)}'})
-
-@app.route('/send_reset_code', methods=['POST'])
-def send_reset_code():
-    """إرسال رمز إعادة تعيين كلمة المرور"""
-    try:
-        data = request.json
-        reset_field = data.get('reset_field', '').strip()
+        }), 200
         
-        if not reset_field:
-            return jsonify({'success': False, 'message': 'يرجى إدخال الإيميل أو رقم العضوية أو رقم الهاتف'})
+    except Exception as e:
+        return jsonify({"message": f"خطأ في تسجيل الدخول: {str(e)}"}), 500
+
+@app.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    """إعادة تعيين كلمة المرور"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({"message": "يرجى إدخال الإيميل"}), 400
         
         conn = sqlite3.connect('roger_loyalty.db')
         cursor = conn.cursor()
         
-        # البحث عن المستخدم
-        if '@' in reset_field:
-            cursor.execute('SELECT email FROM users WHERE email = ?', (reset_field.lower(),))
-        elif reset_field.startswith('LA-ROJ'):
-            cursor.execute('SELECT email FROM users WHERE member_id = ?', (reset_field,))
-        else:
-            cursor.execute('SELECT email FROM users WHERE phone = ?', (reset_field,))
+        cursor.execute("SELECT id, full_name FROM users WHERE email = ?", (email,))
+        user = cursor.fetchone()
+        
+        if not user:
+            # لأسباب أمنية، نقول أن الإيميل تم إرساله حتى لو لم يكن موجود
+            return jsonify({"message": "إذا كان الإيميل مسجل، ستتلقى رابط إعادة التعيين"}), 200
+        
+        # توليد رمز إعادة التعيين
+        reset_token = secrets.token_urlsafe(32)
+        reset_expires = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+        
+        cursor.execute("UPDATE users SET reset_token = ?, reset_expires = ? WHERE email = ?", 
+                      (reset_token, reset_expires, email))
+        conn.commit()
+        conn.close()
+        
+        # إرسال إيميل إعادة التعيين
+        subject = "إعادة تعيين كلمة المرور - Roger Loyalty"
+        body = f"""
+        أهلاً {user[1]},
+        
+        تلقينا طلب لإعادة تعيين كلمة المرور لحسابك في نظام Roger Loyalty.
+        
+        رمز إعادة التعيين: {reset_token}
+        
+        هذا الرمز صالح لمدة ساعة واحدة فقط.
+        
+        إذا لم تطلب إعادة تعيين كلمة المرور، يرجى تجاهل هذا الإيميل.
+        
+        مع تحيات فريق Roger Loyalty
+        """
+        
+        email_sent = send_email(email, subject, body)
+        
+        return jsonify({
+            "message": "إذا كان الإيميل مسجل، ستتلقى رابط إعادة التعيين",
+            "email_sent": email_sent
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"message": f"خطأ في إرسال إعادة التعيين: {str(e)}"}), 500
+
+@app.route('/reset-password', methods=['POST'])
+def reset_password():
+    """تعيين كلمة مرور جديدة"""
+    try:
+        data = request.get_json()
+        reset_token = data.get('reset_token')
+        new_password = data.get('new_password')
+        
+        if not all([reset_token, new_password]):
+            return jsonify({"message": "يرجى إدخال الرمز وكلمة المرور الجديدة"}), 400
+        
+        if len(new_password) < 6:
+            return jsonify({"message": "كلمة المرور يجب أن تكون 6 أحرف على الأقل"}), 400
+        
+        conn = sqlite3.connect('roger_loyalty.db')
+        cursor = conn.cursor()
+        
+        # التحقق من صحة الرمز وأنه لم ينته
+        cursor.execute("SELECT id, email FROM users WHERE reset_token = ? AND reset_expires > ?", 
+                      (reset_token, datetime.utcnow().isoformat()))
+        user = cursor.fetchone()
+        
+        if not user:
+            conn.close()
+            return jsonify({"message": "رمز إعادة التعيين غير صالح أو منتهي الصلاحية"}), 400
+        
+        # تشفير كلمة المرور الجديدة
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # تحديث كلمة المرور وحذف رمز الإعادة
+        cursor.execute('''
+            UPDATE users 
+            SET password = ?, reset_token = NULL, reset_expires = NULL 
+            WHERE id = ?
+        ''', (hashed_password, user[0]))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"message": "تم تحديث كلمة المرور بنجاح"}), 200
+        
+    except Exception as e:
+        return jsonify({"message": f"خطأ في تحديث كلمة المرور: {str(e)}"}), 500
+
+@app.route('/profile/<member_id>', methods=['GET'])
+def get_profile(member_id):
+    """الحصول على بيانات المستخدم"""
+    try:
+        conn = sqlite3.connect('roger_loyalty.db')
+        cursor = conn.cursor()
+        
+        # جلب بيانات المستخدم
+        cursor.execute('''
+            SELECT u.member_id, u.full_name, u.email, u.phone, u.birth_date, u.created_at,
+                   p.total_points
+            FROM users u
+            LEFT JOIN user_points p ON u.member_id = p.member_id
+            WHERE u.member_id = ? AND u.verified = 1
+        ''', (member_id,))
         
         user = cursor.fetchone()
         
         if not user:
             conn.close()
-            return jsonify({'success': False, 'message': 'المستخدم غير موجود'})
+            return jsonify({"message": "المستخدم غير موجود"}), 404
         
-        # توليد رمز إعادة التعيين
-        code = generate_verification_code()
-        expires_at = datetime.now() + timedelta(minutes=10)
-        
+        # جلب آخر 10 معاملات
         cursor.execute('''
-            INSERT INTO verification_codes (email, code, code_type, expires_at)
-            VALUES (?, ?, 'reset_password', ?)
-        ''', (user[0], code, expires_at))
+            SELECT transaction_type, points, description, created_at
+            FROM transactions
+            WHERE member_id = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+        ''', (member_id,))
         
-        conn.commit()
+        transactions = cursor.fetchall()
         conn.close()
         
-        if send_verification_email(user[0], code, 'reset_password'):
-            return jsonify({'success': True, 'message': 'تم إرسال رمز إعادة تعيين كلمة المرور إلى إيميلك'})
-        else:
-            return jsonify({'success': False, 'message': 'حدث خطأ في إرسال الإيميل'})
-    
+        return jsonify({
+            "user": {
+                "member_id": user[0],
+                "full_name": user[1],
+                "email": user[2],
+                "phone": user[3],
+                "birth_date": user[4],
+                "created_at": user[5],
+                "total_points": user[6] or 0
+            },
+            "recent_transactions": [
+                {
+                    "type": t[0],
+                    "points": t[1],
+                    "description": t[2],
+                    "date": t[3]
+                } for t in transactions
+            ]
+        }), 200
+        
     except Exception as e:
-        return jsonify({'success': False, 'message': f'حدث خطأ: {str(e)}'})
+        return jsonify({"message": f"خطأ في جلب البيانات: {str(e)}"}), 500
 
-@app.route('/verify_reset_code', methods=['POST'])
-def verify_reset_code():
-    """التحقق من رمز إعادة التعيين وتغيير كلمة المرور"""
+@app.route('/add-points', methods=['POST'])
+def add_points():
+    """إضافة نقاط للمستخدم (للاستخدام الإداري)"""
     try:
-        data = request.json
-        reset_field = data.get('reset_field', '').strip()
-        code = data.get('code', '').strip()
-        new_password = data.get('new_password', '')
+        data = request.get_json()
+        member_id = data.get('member_id')
+        points = data.get('points')
+        description = data.get('description', 'إضافة نقاط')
+        
+        if not all([member_id, points]):
+            return jsonify({"message": "يرجى إدخال رقم العضوية والنقاط"}), 400
+        
+        if not isinstance(points, int) or points <= 0:
+            return jsonify({"message": "يجب أن تكون النقاط رقم صحيح موجب"}), 400
         
         conn = sqlite3.connect('roger_loyalty.db')
         cursor = conn.cursor()
         
-        # الحصول على الإيميل
-        if '@' in reset_field:
-            email = reset_field.lower()
-        elif reset_field.startswith('LA-ROJ'):
-            cursor.execute('SELECT email FROM users WHERE member_id = ?', (reset_field,))
-            result = cursor.fetchone()
-            if not result:
-                conn.close()
-                return jsonify({'success': False, 'message': 'المستخدم غير موجود'})
-            email = result[0]
-        else:
-            cursor.execute('SELECT email FROM users WHERE phone = ?', (reset_field,))
-            result = cursor.fetchone()
-            if not result:
-                conn.close()
-                return jsonify({'success': False, 'message': 'المستخدم غير موجود'})
-            email = result[0]
-        
-        # التحقق من الرمز
-        cursor.execute('''
-            SELECT id FROM verification_codes 
-            WHERE email = ? AND code = ? AND code_type = 'reset_password' 
-            AND expires_at > ? AND is_used = 0
-        ''', (email, code, datetime.now()))
-        
-        verification = cursor.fetchone()
-        
-        if not verification:
+        # التحقق من وجود المستخدم
+        cursor.execute("SELECT id FROM users WHERE member_id = ? AND verified = 1", (member_id,))
+        if not cursor.fetchone():
             conn.close()
-            return jsonify({'success': False, 'message': 'رمز التحقق غير صحيح أو منتهي الصلاحية'})
+            return jsonify({"message": "المستخدم غير موجود"}), 404
         
-        # تشفير كلمة المرور الجديدة
-        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+        # إضافة المعاملة
+        cursor.execute('''
+            INSERT INTO transactions (member_id, transaction_type, points, description)
+            VALUES (?, 'earn', ?, ?)
+        ''', (member_id, points, description))
         
-        # تحديث كلمة المرور
-        cursor.execute('UPDATE users SET password = ? WHERE email = ?', (hashed_password, email))
+        # تحديث إجمالي النقاط
+        cursor.execute('''
+            UPDATE user_points 
+            SET total_points = total_points + ?
+            WHERE member_id = ?
+        ''', (points, member_id))
         
-        # تحديث حالة الرمز
-        cursor.execute('UPDATE verification_codes SET is_used = 1 WHERE id = ?', (verification[0],))
+        # الحصول على إجمالي النقاط الجديد
+        cursor.execute("SELECT total_points FROM user_points WHERE member_id = ?", (member_id,))
+        new_total = cursor.fetchone()[0]
         
         conn.commit()
         conn.close()
         
-        return jsonify({'success': True, 'message': 'تم تغيير كلمة المرور بنجاح'})
-    
+        return jsonify({
+            "message": f"تم إضافة {points} نقطة بنجاح",
+            "new_total": new_total
+        }), 200
+        
     except Exception as e:
-        return jsonify({'success': False, 'message': f'حدث خطأ: {str(e)}'})
+        return jsonify({"message": f"خطأ في إضافة النقاط: {str(e)}"}), 500
 
 if __name__ == '__main__':
     init_database()
