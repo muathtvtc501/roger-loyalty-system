@@ -5,8 +5,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
-import secrets
-import re
 import random
 from datetime import datetime, timedelta
 from flask_cors import CORS
@@ -15,11 +13,11 @@ app = Flask(__name__)
 CORS(app)
 app.secret_key = os.environ.get('SECRET_KEY', 'roger-loyalty-secret-key-2024')
 
-# إعدادات الإيميل
+# إعدادات الإيميل - بدون قيم افتراضية لأسباب أمنية
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-EMAIL_USER = os.environ.get('EMAIL_USER', 'modmac1000@gmail.com')
-EMAIL_PASS = os.environ.get('EMAIL_PASS', 'yglr plkj lmhr ahty')
+EMAIL_USER = os.environ['EMAIL_USER']
+EMAIL_PASS = os.environ['EMAIL_PASS']
 
 def generate_member_id():
     """توليد رقم عضوية فريد بالشكل LA-ROJ + 7 أرقام عشوائية"""
@@ -27,7 +25,7 @@ def generate_member_id():
     return f"LA-ROJ{random_numbers}"
 
 def init_database():
-    """إنشاء قاعدة البيانات و الجدول الأول"""
+    """إنشاء قاعدة البيانات والجداول المطلوبة"""
     conn = sqlite3.connect('roger_loyalty.db')
     cursor = conn.cursor()
     
@@ -97,6 +95,7 @@ def send_email(to_email, subject, body):
 
 def validate_email(email):
     """التحقق من صحة الإيميل"""
+    import re
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
@@ -138,7 +137,7 @@ def register():
             conn.close()
             return jsonify({"message": "الإيميل مسجل مسبقاً"}), 400
         
-        # تشفير كلمة المرور
+        # تشفير كلمة المرور وتحويلها إلى string
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
         # توليد رقم عضوية فريد
@@ -259,7 +258,7 @@ def login():
             conn.close()
             return jsonify({"message": "بيانات الدخول غير صحيحة"}), 401
         
-        # التحقق من كلمة المرور
+        # التحقق من كلمة المرور - تحويل string من DB إلى bytes للمقارنة
         if not bcrypt.checkpw(password.encode('utf-8'), user[3].encode('utf-8')):
             conn.close()
             return jsonify({"message": "بيانات الدخول غير صحيحة"}), 401
@@ -312,7 +311,8 @@ def forgot_password():
             # لأسباب أمنية، نقول أن الإيميل تم إرساله حتى لو لم يكن موجود
             return jsonify({"message": "إذا كان الإيميل مسجل، ستتلقى رابط إعادة التعيين"}), 200
         
-        # توليد رمز إعادة التعيين
+        # توليد رمز إعادة التعيين باستخدام random بدلاً من secrets
+        import secrets
         reset_token = secrets.token_urlsafe(32)
         reset_expires = (datetime.utcnow() + timedelta(hours=1)).isoformat()
         
@@ -373,7 +373,7 @@ def reset_password():
             conn.close()
             return jsonify({"message": "رمز إعادة التعيين غير صالح أو منتهي الصلاحية"}), 400
         
-        # تشفير كلمة المرور الجديدة
+        # تشفير كلمة المرور الجديدة وتحويلها إلى string
         hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
         # تحديث كلمة المرور وحذف رمز الإعادة
@@ -504,3 +504,7 @@ if __name__ == '__main__':
     init_database()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+    init_database()
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
